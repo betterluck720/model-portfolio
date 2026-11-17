@@ -1,0 +1,148 @@
+# Model Portfolio — Step 05
+
+Step 05 adds secure admin authentication and the first protected CMS dashboard.
+
+## Features
+
+- `/admin/login`
+- PostgreSQL-backed admin account
+- Password hashing with bcrypt
+- Signed HTTP-only session cookie
+- Seven-day admin sessions
+- Logout
+- Protected `/admin` routes
+- Admin dashboard statistics
+- Responsive admin navigation
+- Login redirects to the dashboard
+- Unauthenticated dashboard requests are rejected server-side
+
+## 1. Install dependencies
+
+```bash
+npm install bcryptjs zod
+npm install -D tsx dotenv
+```
+
+## 2. Configure `.env`
+
+Copy `.env.example` to `.env`.
+
+Set a strong `AUTH_SECRET`.
+
+For local development you can use:
+
+```env
+AUTH_SECRET="replace-with-a-long-random-secret"
+ADMIN_EMAIL="admin@example.com"
+ADMIN_PASSWORD="ChangeMe123!"
+```
+
+For production, generate a random secret:
+
+```bash
+openssl rand -hex 32
+```
+
+Do not commit `.env` to Git.
+
+## 3. Update the database
+
+If you already completed Step 04, the `Admin` table is already in the Prisma schema.
+
+Run:
+
+```bash
+npx prisma generate
+npx prisma migrate dev --name admin-auth
+```
+
+If this is a fresh project:
+
+```bash
+npx prisma generate
+npx prisma migrate dev --name init
+```
+
+## 4. Create the initial admin
+
+Run:
+
+```bash
+npx prisma db seed
+```
+
+The seed uses `ADMIN_EMAIL` and `ADMIN_PASSWORD`.
+
+Do not use the example password on a public deployment.
+
+## 5. Start the application
+
+```bash
+npm run dev
+```
+
+Open:
+
+http://localhost:3000/admin/login
+
+Then sign in using your configured admin credentials.
+
+## Authentication design
+
+The password is never stored as plaintext.
+
+The login route:
+
+1. Finds the admin by email.
+2. Compares the submitted password with the bcrypt hash.
+3. Creates a signed session cookie.
+4. Redirects the user to `/admin`.
+
+The admin layout calls `requireAdmin()` on the server before rendering any protected admin page.
+
+The session cookie is:
+
+- HTTP-only
+- SameSite=Lax
+- Secure in production
+- Scoped to the entire site
+- Automatically expired after seven days
+
+## Important production note
+
+This is a strong foundation for the CMS, but before a high-traffic public launch we should add:
+
+- Rate limiting for login attempts
+- CSRF protection for state-changing operations
+- Password reset/change flow
+- Admin account management
+- Optional two-factor authentication
+- Audit logging
+- Session revocation
+
+#Neon Database
+connect Neon database with DATABASE_URL
+
+# add Paypal base 
+## Complete upgrade patch
+
+See [`README-COMPLETE-UPGRADE.md`](./README-COMPLETE-UPGRADE.md) for the latest security hardening notes, safe deployment checklist, and staging tests. This patch improves one-time customer purchase recovery and idempotent PayPal webhook processing without introducing a database migration.
+
+
+## Latest payment upgrade — Step 20
+
+See `README-STEP-20-ERC20-USDT.md` for Ethereum Mainnet USDT checkout, chain verification, environment configuration, PayPal 40/60 allocation tracking, database changes, and production checklist. PayPal-to-USDT conversion remains manual until a compatible, approved crypto payout provider is configured.
+
+## Ethereum USDT receiving wallet
+
+The `.env.example` and `.env.production.example` templates are prefilled with the provided Ethereum Mainnet USDT receiving address: `0x0c0b7871720635cC3eE4eCe01c78058292C9aA41`. Verify the address carefully in your own wallet and set `ERC20_USDT_RECEIVE_ADDRESS` in your actual server/deployment environment. Never configure a private key or recovery phrase. PayPal crypto allocation remains manual until a compatible, approved provider is configured.
+
+## Voice + text AI chatbot
+
+See [`README-VOICE-TEXT-CHATBOT.md`](README-VOICE-TEXT-CHATBOT.md) for setup. Configure `OPENAI_API_KEY` in `.env.local` (server-side only) before testing the floating chatbot.
+
+
+## Chatbot provider
+combine after complete
+
+The floating voice/text chatbot uses OpenRouter. Configure `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` in `.env.local`; see `README-VOICE-TEXT-CHATBOT.md`. Do not use `NEXT_PUBLIC_` for API keys.
