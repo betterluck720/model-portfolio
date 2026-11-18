@@ -1,0 +1,163 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+
+ type Payment = {
+  id: string;
+  paypalOrderId: string;
+  paymentMethod: string;
+  cryptoTxHash: string | null;
+  cryptoAllocationCents: number | null;
+  paypalAllocationCents: number | null;
+  cryptoAllocationStatus: string;
+  amountCents: number;
+  currency: string;
+  status: string;
+  payerName: string | null;
+  payerEmail: string | null;
+  createdAt: string;
+  capturedAt: string | null;
+  refundedAt: string | null;
+  refundId: string | null;
+  refundAmountCents: number | null;
+  refundReason: string | null;
+  media: { id: string; title: string | null; type: "IMAGE" | "VIDEO"; thumbnail: string | null; url: string };
+  auditEvents?: { id: string; action: string; details: string | null; actorEmail: string | null; createdAt: string }[];
+};
+
+type Summary = { revenueCents: number; refundedCents: number; total: number; completed: number; pending: number; failed: number; refunded: number };
+
+const money = (cents: number, currency: string) => new Intl.NumberFormat("en-US", { style: "currency", currency }).format(cents / 100);
+const dateFormat = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+
+export default function PaymentsManager() {
+  const [payments, setPayments] = useState<Payment[]>([]);
+  const [summary, setSummary] = useState<Summary>({ revenueCents: 0, refundedCents: 0, total: 0, completed: 0, pending: 0, failed: 0, refunded: 0 });
+  const [q, setQ] = useState("");
+  const [status, setStatus] = useState("ALL");
+  const [method, setMethod] = useState("ALL");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [refunding, setRefunding] = useState<string | null>(null);
+  const [reconciling, setReconciling] = useState<string | null>(null);
+  const [expandedAudit, setExpandedAudit] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true); setError("");
+    const params = new URLSearchParams({ take: "250" });
+    if (q) params.set("q", q); if (status !== "ALL") params.set("status", status); if (method !== "ALL") params.set("method", method); if (from) params.set("from", from); if (to) params.set("to", to);
+    try {
+      const response = await fetch(`/api/admin/payments?${params}`, { cache: "no-store" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Unable to load payments.");
+      setPayments(data.payments || []); setSummary(data.summary);
+    } catch (err) { setError(err instanceof Error ? err.message : "Unable to load payments."); }
+    finally { setLoading(false); }
+  }, [q, status, method, from, to]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const title = useMemo(() => payments.length === 1 ? "1 transaction" : `${payments.length} transactions`, [payments.length]);
+
+  function exportCsv() {
+    const columns = [
+      ["Payment ID", (payment: Payment) => payment.id],
+      ["Status", (payment: Payment) => payment.status],
+      ["Payment Method", (payment: Payment) => payment.paymentMethod],
+      ["Buyer Name", (payment: Payment) => payment.payerName || ""],
+      ["Buyer Email", (payment: Payment) => payment.payerEmail || ""],
+      ["Media Title", (payment: Payment) => payment.media.title || ""],
+      ["Amount", (payment: Payment) => (payment.amountCents / 100).toFixed(2)],
+      ["Currency", (payment: Payment) => payment.currency],
+      ["PayPal Order ID", (payment: Payment) => payment.paypalOrderId],
+      ["Crypto Transaction", (payment: Payment) => payment.cryptoTxHash || ""],
+      ["Created At", (payment: Payment) => payment.createdAt],
+      ["Captured At", (payment: Payment) => payment.capturedAt || ""],
+      ["Refunded At", (payment: Payment) => payment.refundedAt || ""],
+      ["Refund Amount", (payment: Payment) => payment.refundAmountCents == null ? "" : (payment.refundAmountCents / 100).toFixed(2)],
+      ["Refund Reason", (payment: Payment) => payment.refundReason || ""],
+    ] as const;
+    const escapeCsv = (value: string) => {
+      // Prevent spreadsheet formula injection in user-controlled values.
+      const safe = /^[\s]*[=+@\-]/.test(value) ? `'${value}` : value;
+      return `"${safe.replace(/"/g, '""')}"`;
+    };
+    const rows = [columns.map(([label]) => escapeCsv(label)).join(","), ...payments.map(payment => columns.map(([, value]) => escapeCsv(String(value(payment)))).join(","))];
+    const blob = new Blob([`\uFEFF${rows.join("\r\n")}`], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `payments-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  async function refund(payment: Payment) {
+    const reason = window.prompt("Refund reason (optional):", "Refund requested by customer.");
+    if (reason === null) return;
+    if (!window.confirm(`Refund ${money(payment.amountCents, payment.currency)} for ${payment.media.title || "this media"}?`)) return;
+    setRefunding(payment.id);
+    try {
+      const response = await fetch(`/api/admin/payments/${payment.id}/refund`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Refund failed.");
+      await load();
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "Refund failed.");
+    } finally {
+      setRefunding(null);
+    }
+  }
+
+  async function reconcile(payment: Payment) {
+    if (!window.confirm(`Verify the stored Ethereum USDT transaction for ${payment.media.title || "this purchase"}? This only marks it completed if the on-chain transfer and confirmations are valid.`)) return;
+    setReconciling(payment.id);
+    try {
+      const response = await fetch(`/api/admin/payments/${payment.id}/reconcile`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok && response.status !== 202) throw new Error(data.error || "Reconciliation failed.");
+      if (data.pending) window.alert(data.message || `Still waiting for confirmations (${data.confirmations}/${data.requiredConfirmations}).`);
+      else window.alert("USDT payment reconciled successfully.");
+      await load();
+    } catch (err) { window.alert(err instanceof Error ? err.message : "Reconciliation failed."); }
+    finally { setReconciling(null); }
+  }
+
+  return <div className="space-y-8">
+    <div>
+      <p className="text-xs uppercase tracking-[0.25em] text-neutral-500">Commerce</p>
+      <div className="mt-2 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+        <div><h1 className="font-display text-4xl md:text-5xl">Payments</h1><p className="mt-2 text-sm text-neutral-500">Monitor PayPal and Ethereum USDT sales, allocation tracking, and paid media access.</p></div>
+        <div className="flex flex-wrap gap-2">
+          <button onClick={exportCsv} disabled={payments.length === 0 || loading} className="rounded-full border border-black/10 px-5 py-2.5 text-sm hover:bg-black hover:text-white disabled:cursor-not-allowed disabled:opacity-40">Export CSV</button>
+          <button onClick={() => void load()} className="rounded-full border border-black/10 px-5 py-2.5 text-sm hover:bg-black hover:text-white">Refresh</button>
+        </div>
+      </div>
+    </div>
+
+    <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      {[["Revenue", money(summary.revenueCents, "USD"), "Net after refunds"], ["Sales", summary.completed, "Successful transactions"], ["Refunded", summary.refunded, money(summary.refundedCents, "USD")], ["Pending", summary.pending, "Awaiting completion"]].map(([label, value, detail]) => <div key={String(label)} className="rounded-2xl border border-black/10 bg-white p-6"><p className="text-xs uppercase tracking-[0.18em] text-neutral-500">{label}</p><p className="mt-4 text-3xl font-medium">{value}</p><p className="mt-2 text-sm text-neutral-500">{detail}</p></div>)}
+    </section>
+
+    <section className="rounded-2xl border border-black/10 bg-white p-5 md:p-6">
+      <div className="grid gap-3 lg:grid-cols-[1.5fr_0.7fr_0.7fr_0.7fr]">
+        <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search buyer, email, order ID, media…" className="h-11 rounded-xl border border-black/10 bg-white px-4 text-sm outline-none focus:border-black" />
+        <select value={status} onChange={e => setStatus(e.target.value)} className="h-11 rounded-xl border border-black/10 bg-white px-4 text-sm"><option value="ALL">All statuses</option><option value="COMPLETED">Completed</option><option value="PENDING">Pending</option><option value="FAILED">Failed</option><option value="REFUNDED">Refunded</option></select>
+        <select value={method} onChange={e => setMethod(e.target.value)} className="h-11 rounded-xl border border-black/10 bg-white px-4 text-sm"><option value="ALL">All methods</option><option value="PAYPAL">PayPal</option><option value="ERC20_USDT">Ethereum USDT</option></select>
+        <input type="date" value={from} onChange={e => setFrom(e.target.value)} className="h-11 rounded-xl border border-black/10 bg-white px-4 text-sm" />
+        <input type="date" value={to} min={from || undefined} onChange={e => setTo(e.target.value)} className="h-11 rounded-xl border border-black/10 bg-white px-4 text-sm" />
+      </div>
+      {from && to && from > to ? <p role="alert" className="mt-3 text-sm text-red-700">The end date must be on or after the start date.</p> : <p className="mt-3 text-xs text-neutral-500">CSV export includes the transactions currently loaded for these filters (up to 250 rows).</p>}
+    </section>
+
+    <section className="overflow-hidden rounded-2xl border border-black/10 bg-white">
+      <div className="flex items-center justify-between gap-4 border-b border-black/10 px-5 py-4 md:px-6"><div><p className="text-sm font-medium">Transactions</p><p className="mt-1 text-xs text-neutral-500">{loading ? "Loading…" : title}</p></div><span className="rounded-full bg-neutral-100 px-3 py-1 text-xs text-neutral-600">PayPal + ERC-20 USDT</span></div>
+      {error ? <div className="m-5 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</div> : null}
+      {loading ? <div className="p-10 text-center text-sm text-neutral-500">Loading payments…</div> : payments.length === 0 ? <div className="p-12 text-center"><p className="font-medium">No payments found</p><p className="mt-2 text-sm text-neutral-500">Completed PayPal and ERC-20 USDT purchases will appear here.</p></div> : <div className="overflow-x-auto"><table className="w-full min-w-[980px] text-left"><thead className="bg-neutral-50 text-[10px] uppercase tracking-[0.16em] text-neutral-500"><tr><th className="px-6 py-4">Media</th><th className="px-6 py-4">Buyer</th><th className="px-6 py-4">Method / transaction</th><th className="px-6 py-4">Amount & allocation</th><th className="px-6 py-4">Status</th><th className="px-6 py-4">Date</th><th className="px-6 py-4">Action / audit</th></tr></thead><tbody className="divide-y divide-black/10">{payments.map(payment => <tr key={payment.id} className="hover:bg-neutral-50/70"><td className="px-6 py-4"><div className="flex items-center gap-3"><div className="h-11 w-14 overflow-hidden rounded-lg bg-neutral-100">{payment.media.thumbnail || payment.media.url ? <img src={payment.media.thumbnail || payment.media.url} alt="" className="h-full w-full object-cover" /> : null}</div><div><p className="max-w-[190px] truncate text-sm font-medium">{payment.media.title || `Untitled ${payment.media.type.toLowerCase()}`}</p><p className="mt-1 text-[10px] uppercase tracking-wider text-neutral-400">{payment.media.type}</p></div></div></td><td className="px-6 py-4"><p className="text-sm">{payment.payerName || "PayPal buyer"}</p><p className="mt-1 text-xs text-neutral-500">{payment.payerEmail || "Email unavailable"}</p></td><td className="px-6 py-4"><p className="text-xs font-medium">{payment.paymentMethod === "ERC20_USDT" ? "Ethereum USDT" : "PayPal"}</p><p className="mt-1 max-w-[180px] truncate font-mono text-[10px] text-neutral-500">{payment.cryptoTxHash || payment.paypalOrderId}</p></td><td className="px-6 py-4 text-sm font-medium">{money(payment.amountCents, payment.currency)}{payment.paymentMethod === "PAYPAL" && payment.cryptoAllocationCents !== null && <p className="mt-1 text-[10px] font-normal leading-4 text-neutral-500">40% crypto: {money(payment.cryptoAllocationCents, payment.currency)} · 60% PayPal: {money(payment.paypalAllocationCents || 0, payment.currency)}<br />Crypto allocation: {payment.cryptoAllocationStatus}</p>}</td><td className="px-6 py-4"><span className={`inline-flex rounded-full px-2.5 py-1 text-[10px] uppercase tracking-wider ${payment.status === "COMPLETED" ? "bg-emerald-50 text-emerald-700" : payment.status === "PENDING" ? "bg-amber-50 text-amber-700" : payment.status === "REFUNDED" ? "bg-violet-50 text-violet-700" : "bg-red-50 text-red-700"}`}>{payment.status}</span>{payment.status === "REFUNDED" && payment.refundAmountCents != null ? <p className="mt-1 text-[10px] text-neutral-500">{money(payment.refundAmountCents, payment.currency)} refunded</p> : null}</td><td className="px-6 py-4 text-xs text-neutral-500">{dateFormat.format(new Date(payment.refundedAt || payment.capturedAt || payment.createdAt))}</td><td className="px-6 py-4"><div className="flex flex-col items-start gap-2">{payment.status === "COMPLETED" && payment.paymentMethod !== "ERC20_USDT" ? <button disabled={refunding === payment.id} onClick={() => void refund(payment)} className="rounded-full border border-red-200 px-3 py-1.5 text-xs text-red-700 hover:bg-red-50 disabled:opacity-50">{refunding === payment.id ? "Refunding…" : "Refund"}</button> : payment.paymentMethod === "ERC20_USDT" && payment.status === "PENDING" ? <button disabled={reconciling === payment.id || !payment.cryptoTxHash} onClick={() => void reconcile(payment)} className="rounded-full border border-emerald-200 px-3 py-1.5 text-xs text-emerald-800 hover:bg-emerald-50 disabled:opacity-50">{reconciling === payment.id ? "Checking…" : "Reconcile USDT"}</button> : payment.paymentMethod === "ERC20_USDT" && payment.status === "COMPLETED" ? <span className="text-xs text-neutral-400">Crypto refund manual</span> : payment.status === "REFUNDED" ? <span className="text-xs text-neutral-400">Refunded</span> : <span className="text-xs text-neutral-400">—</span>}<button onClick={() => setExpandedAudit(expandedAudit === payment.id ? null : payment.id)} className="text-xs underline underline-offset-2">{expandedAudit === payment.id ? "Hide audit" : `Audit (${payment.auditEvents?.length || 0})`}</button></div>{expandedAudit === payment.id ? <div className="mt-3 min-w-[200px] space-y-2 border-t border-black/10 pt-3">{payment.auditEvents?.length ? payment.auditEvents.map(event => <div key={event.id} className="text-[10px] leading-4"><p className="font-medium">{event.action.replaceAll("_", " ")}</p><p className="text-neutral-500">{dateFormat.format(new Date(event.createdAt))} · {event.actorEmail || "System"}</p>{event.details ? <p className="break-words text-neutral-500">{event.details}</p> : null}</div>) : <p className="text-xs text-neutral-500">No audit events recorded.</p>}</div> : null}</td></tr>)}</tbody></table></div>}
+    </section>
+  </div>;
+}
