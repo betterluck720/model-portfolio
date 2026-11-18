@@ -1,0 +1,198 @@
+"use client";
+
+import { useRef, useState } from "react";
+
+type Props = {
+  kind: "image" | "video";
+  multiple?: boolean;
+  accept: string;
+  onComplete?: () => void;
+};
+
+type UploadResult = { name: string; ok: boolean; message: string };
+
+async function readJson(response: Response): Promise<Record<string, any>> {
+  const text = await response.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: text.slice(0, 300) || `Request failed (${response.status}).` };
+  }
+}
+
+function putFileWithProgress(url: string, file: File, onProgress: (percent: number) => void) {
+  return new Promise<void>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", url);
+    xhr.setRequestHeader("Content-Type", file.type);
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100));
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve();
+      } else {
+        reject(new Error(`Storage returned HTTP ${xhr.status}. Check bucket CORS and storage permissions.`));
+      }
+    };
+    xhr.onerror = () => reject(new Error(
+      "Could not reach object storage. This is commonly a bucket CORS or endpoint configuration issue. Allow PUT from your Vercel site origin and allow the Content-Type header."
+    ));
+    xhr.onabort = () => reject(new Error("Upload cancelled."));
+    xhr.send(file);
+  });
+}
+
+export default function DirectUpload({ kind, multiple = false, accept, onComplete }: Props) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+  const [status, setStatus] = useState("");
+  const [progress, setProgress] = useState(0);
+  const [results, setResults] = useState<UploadResult[]>([]);
+  const [category, setCategory] = useState("Auto");
+  const [orientation, setOrientation] = useState("Auto");
+
+  async function uploadFile(file: File, index: number, total: number) {
+    setStatus(`Uploading ${file.name} (${index + 1}/${total})…`);
+    setProgress(0);
+
+    const form = new FormData();
+
+    if (kind === "image") {
+      form.append("files", file);
+      form.append("category", category);
+      form.append("orientation", orientation);
+    } else {
+      form.append("video", file);
+    }
+
+    const endpoint = kind === "image"
+      ? "/api/admin/gallery/upload"
+      : "/api/admin/videos/upload";
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      body: form,
+    });
+
+    setProgress(100);
+    const result = await readJson(response);
+
+    if (!response.ok) {
+      if (response.status === 401) {
+        throw new Error("Admin session expired. Sign in again, then retry.");
+      }
+      throw new Error(result.error || `Upload failed (HTTP ${response.status}).`);
+    }
+
+    setStatus(`Saved ${file.name} (${index + 1}/${total}).`);
+  }
+
+  async function handleChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files || []);
+    if (!files.length) return;
+
+    if (kind === "image") {
+      const invalid = files.filter((file) => !["image/jpeg", "image/png", "image/webp"].includes(file.type) || file.size > 10 * 1024 * 1024);
+      if (invalid.length) {
+        setResults(invalid.map((file) => ({ name: file.name, ok: false, message: !["image/jpeg", "image/png", "image/webp"].includes(file.type) ? "Choose a JPG, PNG, or WebP image." : "Image exceeds the 10MB limit." })));
+        setStatus(`${invalid.length} file${invalid.length === 1 ? "" : "s"} need attention. Valid files will still upload.`);
+      }
+    }
+
+    setUploading(true);
+    setStatus("");
+    setResults([]);
+    const nextResults: UploadResult[] = [];
+    let succeeded = 0;
+
+    try {
+      for (let index = 0; index < files.length; index++) {
+        const file = files[index];
+        const invalidImage = kind === "image" && (!["image/jpeg", "image/png", "image/webp"].includes(file.type) || file.size > 10 * 1024 * 1024);
+        if (invalidImage) {
+          const message = !["image/jpeg", "image/png", "image/webp"].includes(file.type) ? "Choose a JPG, PNG, or WebP image." : "Image exceeds the 10MB limit.";
+          nextResults.push({ name: file.name, ok: false, message });
+          setResults([...nextResults]);
+          continue;
+        }
+        try {
+          await uploadFile(file, index, files.length);
+          succeeded++;
+          nextResults.push({ name: file.name, ok: true, message: "Uploaded and saved." });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Upload failed.";
+          nextResults.push({ name: file.name, ok: false, message });
+        }
+        setResults([...nextResults]);
+      }
+
+      if (succeeded > 0) onComplete?.();
+      const failed = files.length - succeeded;
+      setStatus(failed === 0
+        ? `${succeeded} upload${succeeded === 1 ? "" : "s"} complete.`
+        : `${succeeded} succeeded, ${failed} failed. See details below.`);
+    } finally {
+      setUploading(false);
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  }
+
+  return (
+    <div className="rounded-[1.75rem] border border-[#171412]/10 bg-[#fffdfb]/85 p-5 shadow-[0_20px_40px_rgba(17,14,12,0.04)] md:p-6">
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.22em] text-[#584e49]">Quick upload</p>
+          <h3 className="mt-2 font-display text-3xl text-[#171412]">
+            {kind === "video" ? "Video library" : "Portfolio images"}
+          </h3>
+        </div>
+        <span className="rounded-full border border-[#171412]/10 bg-[#f5efe9] px-3 py-1 text-[9px] uppercase tracking-[0.18em] text-[#171412]">
+          {kind === "video" ? "Video" : "Image"}
+        </span>
+      </div>
+
+      <div className="mt-5 grid gap-3 md:grid-cols-2">
+        <select value={category} onChange={(e) => setCategory(e.target.value)} className="rounded-xl border p-3 text-sm">
+          {['Auto','Beauty','Fashion','Editorial','Commercial','Lifestyle','Runway','Portrait','Landscape','Square','BTS','Product','Event','Other'].map((x)=><option key={x}>{x}</option>)}
+        </select>
+        <select value={orientation} onChange={(e) => setOrientation(e.target.value)} className="rounded-xl border p-3 text-sm">
+          {['Auto','Portrait','Landscape','Square'].map((x)=><option key={x}>{x}</option>)}
+        </select>
+      </div>
+
+      <label className="mt-6 flex cursor-pointer items-center justify-between gap-3 rounded-[1.25rem] border border-dashed border-[#171412]/20 bg-[#f8f4f0] px-4 py-4 transition hover:border-[#171412]/35 hover:bg-[#f3eee8]">
+        <input ref={inputRef} type="file" accept={accept} multiple={multiple} disabled={uploading}
+          onChange={handleChange} className="sr-only" />
+        <span className="text-sm text-[#171412]">
+          {uploading ? "Uploading…" : `Select ${kind === "video" ? "video files" : "images"}`}
+        </span>
+        <span className="rounded-full bg-[#171412] px-3 py-1.5 text-[9px] uppercase tracking-[0.18em] text-white">
+          {uploading ? "Busy" : "Add"}
+        </span>
+      </label>
+
+      <p className="mt-3 text-xs leading-6 text-[#584e49]">
+        {kind === "video"
+          ? "MP4, WebM and MOV up to 500MB. Files are uploaded securely through the application server."
+          : "JPG, PNG and WebP up to 10MB. Images are uploaded securely through the application server."}
+      </p>
+      {uploading && (
+        <div className="mt-3 h-2 overflow-hidden rounded-full bg-[#e8e0d8]" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
+          <div className="h-full rounded-full bg-[#171412] transition-[width]" style={{ width: `${progress}%` }} />
+        </div>
+      )}
+      {status && <p className="mt-3 text-sm text-[#171412]" role="status">{status}</p>}
+      {results.length > 0 && (
+        <ul className="mt-3 space-y-2 text-xs leading-5" aria-label="Upload results">
+          {results.map((result, index) => (
+            <li key={`${result.name}-${index}`} className={result.ok ? "text-green-800" : "text-red-700"}>
+              <strong>{result.ok ? "✓" : "✕"} {result.name}:</strong> {result.message}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
